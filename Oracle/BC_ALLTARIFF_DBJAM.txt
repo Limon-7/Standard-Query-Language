@@ -1,0 +1,22 @@
+INSERT INTO BC_ALLTARIFF_DBJAM
+                        (TARIFF,BILL_CYCLE_CODE,FLAT,OFFPEAK,PEAK,NOC)
+                             SELECT   CASE 
+                                WHEN TARIFF='F' AND BUS_TYPE_CODE=12 THEN 'FB12'
+                                WHEN TARIFF='F' AND BUS_TYPE_CODE<>12 THEN 'FBOTHER'
+                                ELSE TARIFF
+                                END AS TARIFF,
+                                bill_cycle_code,
+                                SUM( NVL(CONS_KWH_SR,0) + NVL(B.OLD_KWH_SR_CONS,0)+NVL(PFC_SR_CONS,0) ) AS FLAT,
+                                SUM(NVL(B.CONS_KWH_OFPK,0) + NVL(B.OLD_KWH_OFPK_CONS,0) +NVL(PFC_OFPK_CONS,0)) AS OFFPEAK,
+                                SUM(NVL(CONS_KWH_PK,0) + NVL(B.OLD_KWH_PK_CONS,0) +NVL(PFC_PK_CONS,0)) AS PEAK,
+                                count(*) NOC
+                                FROM EBC.BC_BILL_IMAGE b
+                                where bill_cycle_code <=202103
+                                GROUP BY 
+                                CASE 
+                                WHEN TARIFF='F' AND BUS_TYPE_CODE=12 THEN 'FB12'
+                                WHEN TARIFF='F' AND BUS_TYPE_CODE<>12 THEN 'FBOTHER'
+                                ELSE TARIFF
+                                END,
+                                bill_cycle_code
+                                order by tariff

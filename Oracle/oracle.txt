@@ -1,0 +1,44 @@
+select  
+                           CLS_KWH_SR_RDNG AS OPN_KWH_SR_RDNG,
+                            CONS_KWH_SR,
+                            (nvl(CURRENT_VAT,0.00)+ nvl(ENG_CHRG_SR,0.00)+nvl(ENG_CHRG_OFPK,0.00)+nvl(ENG_CHRG_PK,0.00)+nvl(MINIMUM_CHRG,0.00)+nvl(SERVICE_CHRG,0.00)+nvl(DEMAND_CHRG,0.00)+nvl(XF_LOSS_CHRG,0.00)+nvl(XF_RENT,0.00)+nvl(PFC_CHARGE,0.00)) As Current_Bill,
+                            (TOTAL_BILL-(nvl(CURRENT_VAT,0.00)+ nvl(ENG_CHRG_SR,0.00)+nvl(ENG_CHRG_OFPK,0.00)+nvl(ENG_CHRG_PK,0.00)+nvl(MINIMUM_CHRG,0.00)+nvl(SERVICE_CHRG,0.00)+nvl(DEMAND_CHRG,0.00)+nvl(XF_LOSS_CHRG,0.00)+nvl(XF_RENT,0.00)+nvl(PFC_CHARGE,0.00))) as Arrear_Bill,
+                            TOTAL_BILL,
+                            (BC_RECEIPT_HDR.RECEIPT_AMT+BC_RECEIPT_HDR.VAT_AMT) as PAID_AMT,
+                            0.0 as BALANCE,
+                            BC_RECEIPT_HDR.RECEIPT_DATE,
+                            BC_BILL_IMAGE. INVOICE_DUE_DATE AS INVOICE_DATE,
+                            to_date( substr(BC_BILL_IMAGE.BILL_CYCLE_CODE,5,2) ||'/' ||  '01' ||  '/' ||  substr(BC_BILL_IMAGE.BILL_CYCLE_CODE,1,4), 'MM/DD/YYYY') as Bill_Month,
+                            
+                                 SUBSTR (BC_BILL_IMAGE.INVOICE_NUM,
+                                                 1,
+                                                 (LENGTH (BC_BILL_IMAGE.INVOICE_NUM) - 1))
+                                            AS BILL_NO,BC_BILL_IMAGE.INVOICE_NUM,
+                            BC_BILL_IMAGE.TARIFF,
+                            BC_BILL_IMAGE.BILL_CYCLE_CODE,
+                            BC_BILL_IMAGE.CUSTOMER_NUM,
+                            BC_BILL_IMAGE.CONS_CHK_DIGIT,
+                            BC_BILL_IMAGE.WALKING_SEQUENCE,
+                            BC_BILL_IMAGE.LOCATION_CODE,
+                            BC_BILL_IMAGE.METER_COND_KWH,
+                            (SUBSTR (BC_BILL_IMAGE.INVOICE_NUM, -1, 1) || BC_BILL_IMAGE.INVOICE_CHK_DGT) AS CD,
+                            BC_BILL_IMAGE.CONS_EXTG_NUM,
+                            BC_BILL_IMAGE.METER_NUM_KWH,
+                            BC_BILL_IMAGE.OMF_KW,
+                            BC_BILL_IMAGE.SANC_LOAD,
+                            BC_CUSTOMER_ADDR.ADDR_DESCR1,
+                            BC_CUSTOMER_ADDR.ADDR_DESCR2,
+                            BC_CUSTOMER_ADDR.ADDR_DESCR3,
+                            (BC_BILL_IMAGE.CUSTOMER_NUM || BC_BILL_IMAGE.CONS_CHK_DIGIT) AS CONSUMER_NUMBER,
+                            BC_CUSTOMERS.CUSTOMER_NAME,
+                            BC_LOCATION_MASTER.DESCR,
+                            'BillMonth' as from_Bill,
+                            '' as To_Bill,
+                            BC_RECEIPT_HDR.RECEIPT_TYPE_CODE  AS STATUS 
+                            from ebc.bc_bill_image left join EBC.BC_RECEIPT_HDR on BC_RECEIPT_HDR.INVOICE_NUM=BC_BILL_IMAGE.INVOICE_NUM AND BC_RECEIPT_HDR.RECEIPT_TYPE_CODE !='CRV'
+                            inner join ebc.BC_CUSTOMERS on BC_CUSTOMERS.CUSTOMER_NUM=BC_BILL_IMAGE.CUSTOMER_NUM and BC_BILL_IMAGE.CONS_CHK_DIGIT=BC_CUSTOMERS.CHECK_DIGIT
+                            inner join ebc.BC_LOCATION_MASTER on BC_LOCATION_MASTER.LOCATION_CODE=BC_BILL_IMAGE.LOCATION_CODE
+                            inner join EBC.BC_CUSTOMER_ADDR on BC_CUSTOMER_ADDR.CUST_ID=BC_BILL_IMAGE.CUST_ID
+                            WHERE BC_BILL_IMAGE.CUST_ID= CID('72714563') AND BC_BILL_IMAGE.BILL_CYCLE_CODE >='202012' AND BC_BILL_IMAGE.BILL_CYCLE_CODE <= '202101'
+                            
+                            ORDER BY  bc_bill_image.BILL_CYCLE_CODE DESC
