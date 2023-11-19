@@ -1,0 +1,1131 @@
+using System;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Mail;
+using System.Security.Claims;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Transactions;
+using Core.Entities;
+using Core.Entities.Payment;
+using DataModel.Const;
+using Infrastructure.Data;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+
+namespace API.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [Authorize(Roles = SystemRoles.Admin)]
+    public class ScriptController : ControllerBase
+    {
+        private const int BatchSize = 100;
+        private const int MaxRetryAttempts = 3;
+        private static readonly TimeSpan SleepInterval = new(0, 0, 3);
+        private static readonly TimeSpan RetryInterval = new(0, 0, 3);
+        private readonly ILogger<ScriptController> logger;
+        private readonly UserManager<AppUser> userManager;
+        private readonly StoreContext context;
+
+        public ScriptController(ILogger<ScriptController> logger, UserManager<AppUser> userManager, StoreContext context)
+        {
+            this.logger = logger;
+            this.userManager = userManager;
+            this.context = context;
+        }
+
+        // [HttpPost("StudentInformation")]
+        // public Task<bool> MigrateStudents()
+        // {
+        //     var students = userManager.Users.Where(u => u.GuardianId != null).ToList();
+        //     ProcessMigration(students, MigrationType.StudentUserUpdate, "Update Student Information");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpPost("ValidParentInformation")]
+        // public Task<bool> MigrateValidParents()
+        // {
+        //     var parents = userManager.Users.Where(u => u.GuardianId == null && (u.EmailConfirmed == true || u.PhoneNumberConfirmed == true))
+        //         .ToList();
+        //     ProcessMigration(parents, MigrationType.ValidParentUserUpdate, "Update Already Valid Parent Information");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpPost("UpdateUnfortunateParents")]
+        // public Task<bool> UpdateUnfortunateParents()
+        // {
+        //     var parents = userManager.Users.Where(u =>
+        //         u.GuardianId == null && u.EmailConfirmed == false && u.PhoneNumberConfirmed == false).ToList();
+        //     ProcessMigration(parents, MigrationType.UpdateUnfortunateParents, "Update Unfortunate Parents Information");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpPost("UpdateStudentUserRole")]
+        // public Task<bool> UpdateStudentUserRole()
+        // {
+        //     var students = userManager.Users.Where(u => u.GuardianId != null)
+        //         .Include(u => u.UserRoles)
+        //         .ThenInclude(u => u.Role)
+        //         .ToList();
+        //     ProcessMigration(students, MigrationType.UpdateStudentUserRole, "Update Student User Role.");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpPost("UpdateParentUserRole")]
+        // public Task<bool> UpdateParentUserRole()
+        // {
+        //     var parents = userManager.Users.Where(u => u.GuardianId == null)
+        //         .Include(u => u.UserRoles)
+        //         .ThenInclude(u => u.Role)
+        //         .ToList();
+        //     ProcessMigration(parents, MigrationType.UpdateParentUserRole, "Update Parent User Role.");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpPost("UpdateUserTwoFactor")]
+        // public Task<bool> UpdateUserTwoFactor()
+        // {
+        //     var users = userManager.Users.Where(u => u.TwoFactorEnabled == true)
+        //         .ToList();
+        //     ProcessMigration(users, MigrationType.UpdateUserTwoFactor, "Update User Two Factor.");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpPost("UpdateUserFirstName")]
+        // public Task<bool> UpdateUserFirstName()
+        // {
+        //     // var usersWithNoProfile = userManager.Users.Include(x => x.UserProfile)
+        //     //     .Include(r => r.UserRoles).ThenInclude(x => x.Role).Where(x => x.UserProfile == null)
+        //     //     .ToList();
+        //
+        //     var usersWithMissingFirstName = userManager.Users.Include(x => x.UserProfile)
+        //         .Include(r => r.UserRoles).ThenInclude(x => x.Role)
+        //         .Where(x =>
+        //             ((x.Email != null && x.EmailConfirmed == true )|| (x.PhoneNumber != null && x.PhoneNumberConfirmed == true))
+        //             && x.UserProfile!= null  && x.UserProfile.FirstName==null && x.UserRoles.Count>0
+        //             )
+        //         .ToList();
+        //     ProcessMigration(usersWithMissingFirstName, MigrationType.UpdateUserFirstName, "Update User Profile.");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpDelete("DeleteInvalidUserStudent")]
+        // public Task<bool> DeleteInvalidUserStudent()
+        // {
+        //     var invalidParent = userManager.Users.Include(x => x.UserProfile)
+        //         .Include(r => r.UserRoles).ThenInclude(x=>x.Role)
+        //         .Where(x=>x.UserProfile==null && x.GuardianId==null)
+        //         .ToList();
+        //     ProcessMigration(invalidParent, MigrationType.DeleteInvalidUserStudent, "Delete student");
+        //     return Task.FromResult(true);
+        // }
+        //
+        // [HttpDelete("DeleteInvalidUser")]
+        // public async Task<bool> DeleteInvalidUser()
+        // {
+        //     var invalidParents = await userManager.Users.Include(x => x.UserProfile)
+        //         .Include(r => r.UserRoles).ThenInclude(x=>x.Role)
+        //         .Where(x=>x.UserProfile == null && x.GuardianId == null).ToListAsync();
+        //
+        //     var userDeleted = 0;
+        //     
+        //     foreach (var user in invalidParents)
+        //     {
+        //         var result = Task.Run(async () => await userManager.DeleteAsync(user)).Result;
+        //
+        //         if (result.Succeeded)
+        //         {
+        //             userDeleted++;
+        //             logger.LogInformation("User {UserId} deleted successfully, No -> {UserDeleted}", user.Id,
+        //                 userDeleted);
+        //         }
+        //         else
+        //         {
+        //             logger.LogInformation("Failed to delete user {UserId}: {Join}", user.Id,
+        //                 string.Join(", ", result.Errors));
+        //         }
+        //     }
+        //     
+        //     return true;
+        // }
+
+        // [HttpPut("UpdateSubjectSlug")]
+        // public async Task<bool> UpdateSubjectSlug()
+        // {
+        //     var subjects = await context.Subjects.Where(x => x.Slug == null).ToListAsync();
+        //
+        //     var updatedSubject = 0;
+        //
+        //     foreach (var subject in subjects)
+        //     {
+        //         try
+        //         {
+        //             subject.Slug = $"{subject.GradeId}-{subject.NameEn.ToLower().Replace(" ", "-")}";
+        //             context.Update(subject);
+        //             await context.SaveChangesAsync();
+        //             updatedSubject++;
+        //             logger.LogInformation("Subject {SubjectId} updated successfully, No -> {UpdatedSubject}", subject.SubjectId,
+        //                 updatedSubject);
+        //         }
+        //         catch (Exception e)
+        //         {
+        //             logger.LogInformation("Failed to update subject {SubjectId}: {Join}", subject.SubjectId,
+        //                 string.Join(", ", e.Message));
+        //         }
+        //     }
+        //
+        //     return true;
+        // }
+
+
+        #region PaymentModule
+
+        #region # CreateProProductPlan
+
+        [HttpPost("CreateProProductPlan")]
+        public async Task<ActionResult<bool>> CreateProProductPlan()
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var cholporiProduct = await context.CholporiProducts.Where(x => x.IsPro).FirstOrDefaultAsync();
+            if (cholporiProduct == null) return StatusCode(422, "Pro Cholpori Product is not found");
+
+            var productPlans = await context.Products.Where(x => x.IsPro).Select(x => new ProductPlan()
+            {
+                ProductPlanId = x.ProductId,
+                CholporiProductId = cholporiProduct.CholporiProductId,
+                NameEn = x.NameEn,
+                NameBn = x.NameBn,
+                DescriptionEn = x.DescriptionEn,
+                DescriptionBn = x.DescriptionBn,
+                IsPro = x.IsPro,
+                IsActive = x.IsActive,
+                IsVisible = x.IsActive,
+                SortOrder = x.SortOrder,
+                RecurringInterval = x.RecurringInterval + 1,
+                RecurringCount = x.RecurringCount,
+                ActualAmount = x.UnitAmount,
+                DiscountedAmount = x.UnitAmount,
+                DiscountPercentage = 0,
+                CreatedAt = x.CreatedAt,
+                UpdatedAt = x.UpdatedAt,
+                CreatedBy = userId
+
+            }).ToListAsync();
+
+            using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+            try
+            {
+                await context.ProductPlans.AddRangeAsync(productPlans);
+                await context.SaveChangesAsync();
+                scope.Complete();
+                logger.LogInformation($"Created Total {productPlans.Count} Pro ProductPlans");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogInformation($"Pro Product Plans creations failed =>>{e.Message}");
+                return false;
+            }
+        }
+
+        #endregion # EndCreateProProductPlan
+
+        #region # CreateBasicProductPlan
+
+        [HttpPost("CreateBasicProductPlan")]
+        public async Task<ActionResult<bool>> CreateBasicProductPlan()
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var cholporiProduct = await context.CholporiProducts.Where(x => x.IsPro == false).FirstOrDefaultAsync();
+            if (cholporiProduct == null) return StatusCode(422, "Basic Cholpori Product is not found");
+
+            var productPlans = await context.Products.Where(x => x.IsPro == false).Select(x => new ProductPlan()
+            {
+                ProductPlanId = x.ProductId,
+                CholporiProductId = cholporiProduct.CholporiProductId,
+                NameEn = x.NameEn,
+                NameBn = x.NameBn,
+                DescriptionEn = x.DescriptionEn,
+                DescriptionBn = x.DescriptionBn,
+                IsPro = false,
+                IsActive = x.IsActive,
+                IsVisible = x.IsActive,
+                SortOrder = x.SortOrder,
+                RecurringInterval = 0,
+                RecurringCount = x.RecurringCount,
+                ActualAmount = 0,
+                DiscountedAmount = 0,
+                DiscountPercentage = 0,
+                CreatedAt = x.CreatedAt,
+                UpdatedAt = x.UpdatedAt,
+                CreatedBy = userId
+
+            }).ToListAsync();
+
+            using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+            try
+            {
+                await context.ProductPlans.AddRangeAsync(productPlans);
+                await context.SaveChangesAsync();
+                scope.Complete();
+                logger.LogInformation($"Create Total {productPlans.Count} Basic ProductPlans");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogInformation($"Basic Product Plans creations failed =>>{e.Message}");
+                return false;
+            }
+        }
+
+        #endregion # EndCreateBasicProductPlan
+
+        #region # Subscriptions
+
+        #region # UpdateParentSubscriptionPeriod
+
+        [HttpPut("UpdateParentSubscriptionPeriod")]
+        public async Task<bool> UpdateParentSubscriptionPeriod()
+        {
+            var parentsWithStudent = await LoadSubscriptionsData();
+            var count = 0;
+            foreach (var parentStudent in parentsWithStudent)
+            {
+                // var currentPeriodStart = parentStudent.CurrentPeriodStart;
+                // var currentPeriodEnd = parentStudent.CurrentPeriodEnd;
+                var currentPeriodStart = DateTime.UtcNow;
+                var currentPeriodEnd = DateTime.UtcNow;
+                var status = parentStudent.Status;
+
+                foreach (var student in parentStudent.Students)
+                {
+                    if (student.CurrentPeriodStart < currentPeriodStart) currentPeriodStart = student.CurrentPeriodStart;
+                    if (student.CurrentPeriodEnd > currentPeriodEnd) currentPeriodEnd = student.CurrentPeriodEnd;
+                }
+
+                status = currentPeriodEnd >= DateTime.UtcNow;
+
+                if (currentPeriodEnd != parentStudent.CurrentPeriodEnd || currentPeriodStart != parentStudent.CurrentPeriodStart ||
+                    status != parentStudent.Status)
+                {
+                    context.Subscriptions.Update(new Subscription()
+                    {
+                        SubscriptionId = parentStudent.SubscriptionId,
+                        CollectionMethod = parentStudent.CollectionMethod,
+                        CurrentPeriodStart = currentPeriodStart,
+                        CurrentPeriodEnd = currentPeriodEnd,
+                        CancelAtPeriodEnd = parentStudent.CancelAtPeriodEnd,
+                        CancelAt = currentPeriodEnd,
+                        Status = status,
+                        UserId = parentStudent.UserId,
+                        ProductId = parentStudent.ProductId,
+                        CholporiProductId = parentStudent.CholporiProductId,
+                        LastInvoiceId = parentStudent.LastInvoiceId,
+                        CreatedAt = parentStudent.CreatedAt,
+                        UpdatedAt = parentStudent.UpdatedAt
+                    });
+
+                    await context.SaveChangesAsync();
+                    count++;
+                    logger.LogInformation($"Updated Parent Subscriptions -> {count}");
+                }
+            }
+
+            logger.LogInformation($"Total Update parents=> {count}");
+            return true;
+        }
+
+        #endregion UpdateParentSubscriptionPeriod
+
+        #region UpdateSubscriptionCholporiProductId
+
+        [HttpPut("UpdateSubscriptionCholporiProductId")]
+        public async Task<bool> UpdateSubscriptionCholporiProductId()
+        {
+            var productSubscriptionList = await LoadSubscriptionCholporiProductDetails();
+            var count = 0;
+            try
+            {
+                context.Subscriptions.UpdateRange(productSubscriptionList);
+                await context.SaveChangesAsync();
+                count += productSubscriptionList.Count;
+                logger.LogInformation($"Total Product Details updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError(e.Message);
+                return false;
+            }
+        }
+
+        #endregion UpdateSubscriptionProductDetails
+
+        #region DeleteStudentSubscription
+
+        [HttpDelete("DeleteStudentSubscription")]
+        public async Task<bool> DeleteStudentSubscription()
+        {
+            var parentsWithStudent = await LoadSubscriptionsData();
+            var count = 0;
+            foreach (var parentStudent in parentsWithStudent)
+            {
+                context.Subscriptions.RemoveRange(parentStudent.Students);
+                await context.SaveChangesAsync();
+                count += parentStudent.Students.Count;
+                logger.LogInformation($"For Parent==>{parentStudent.UserId} removed Students {parentStudent.Students.Count}");
+            }
+
+            logger.LogInformation($"Total Student subscription remove=> {count}");
+            return true;
+        }
+
+        #endregion DeleteStudentSubscription
+
+        #region #FetchingSubscriptionsData
+
+        private async Task<List<ParentWithStudentSubscription>> LoadSubscriptionsData()
+        {
+            var query = from s in context.Subscriptions
+                join u in context.Users
+                    on s.UserId equals u.Id
+                select new
+                {
+                    s.SubscriptionId,
+                    s.CollectionMethod,
+                    s.CurrentPeriodEnd,
+                    s.CurrentPeriodStart,
+                    s.CancelAtPeriodEnd,
+                    s.CancelAt,
+                    s.Status,
+                    s.UserId,
+                    s.ProductId,
+                    s.CholporiProductId,
+                    s.LastInvoiceId,
+                    s.UpdatedAt,
+                    s.CreatedAt,
+                    u.GuardianId
+                };
+
+            var result = await query.ToListAsync();
+            var parents = result.Where(x => x.GuardianId == null).ToList();
+            var students = result.Where(x => x.GuardianId != null).ToList();
+            var parentsWithStudent = parents.Select(s => new ParentWithStudentSubscription()
+            {
+                SubscriptionId = s.SubscriptionId,
+                CollectionMethod = s.CollectionMethod,
+                CurrentPeriodEnd = s.CurrentPeriodEnd,
+                CurrentPeriodStart = s.CurrentPeriodStart,
+                CancelAtPeriodEnd = s.CancelAtPeriodEnd,
+                CancelAt = s.CancelAt,
+                Status = s.Status,
+                UserId = s.UserId,
+                ProductId = s.ProductId,
+                CholporiProductId = s.CholporiProductId,
+                LastInvoiceId = s.LastInvoiceId,
+                UpdatedAt = s.UpdatedAt,
+                CreatedAt = s.UpdatedAt,
+                Students = students.Where(x => x.GuardianId == s.UserId).Select(y => new Subscription()
+                {
+                    SubscriptionId = y.SubscriptionId,
+                    CollectionMethod = y.CollectionMethod,
+                    CurrentPeriodEnd = y.CurrentPeriodEnd,
+                    CurrentPeriodStart = y.CurrentPeriodStart,
+                    CancelAtPeriodEnd = y.CancelAtPeriodEnd,
+                    CancelAt = y.CancelAt,
+                    Status = y.Status,
+                    UserId = y.UserId,
+                    ProductId = y.ProductId,
+                    CholporiProductId = y.CholporiProductId,
+                    LastInvoiceId = y.LastInvoiceId,
+                    UpdatedAt = y.UpdatedAt,
+                    CreatedAt = y.CreatedAt,
+                }).ToList()
+            }).ToList();
+
+            return parentsWithStudent;
+        }
+
+        private class ParentWithStudentSubscription : Subscription
+        {
+            public IList<Subscription> Students { get; set; }
+
+        }
+
+
+        private async Task<List<Subscription>> LoadSubscriptionCholporiProductDetails()
+        {
+            var query = from s in context.Subscriptions
+                join u in context.Users
+                    on s.UserId equals u.Id
+                join pp in context.ProductPlans
+                    on s.ProductId equals pp.ProductPlanId
+                where u.GuardianId == null
+                select new Subscription()
+                {
+                    SubscriptionId = s.SubscriptionId,
+                    CollectionMethod = s.CollectionMethod,
+                    CurrentPeriodEnd = s.CurrentPeriodEnd,
+                    CurrentPeriodStart = s.CurrentPeriodStart,
+                    CancelAtPeriodEnd = s.CancelAtPeriodEnd,
+                    CancelAt = s.CancelAt,
+                    Status = s.Status,
+                    UserId = s.UserId,
+                    ProductId = s.ProductId,
+                    CholporiProductId = pp.CholporiProductId,
+                    LastInvoiceId = s.LastInvoiceId,
+                    UpdatedAt = s.UpdatedAt,
+                    CreatedAt = s.CreatedAt
+
+                };
+            var data = await query.ToListAsync();
+            return data;
+        }
+
+        #endregion FetchingSubscriptionsData
+
+        #endregion Subscriptions
+
+        #region CouponLogSection
+
+        [HttpPut("UpdateCouponLogParentId")]
+        public async Task<bool> UpdateCouponLogParentId()
+        {
+            var couponLogList = await context.CouponLogs
+                .Include(x => x.AppUser)
+                .Where(x => x.AppUser.GuardianId != null)
+                .Select(x => new CouponLog()
+                {
+                    CouponLogId = x.CouponLogId,
+                    CouponId = x.CouponId,
+                    TransactionId = x.TransactionId,
+                    AppUserId = x.AppUser.GuardianId,
+                    ProductId = x.ProductId,
+                    ProductPlanId = x.ProductPlanId,
+                    DiscountedUnitAmount = x.DiscountedUnitAmount,
+                    CouponStatus = x.CouponStatus,
+                    CreatedAt = x.CreatedAt,
+                    UpdatedAt = x.UpdatedAt
+                })
+                .ToListAsync();
+            var count = 0;
+            try
+            {
+                context.CouponLogs.UpdateRange(couponLogList);
+                await context.SaveChangesAsync();
+                count += couponLogList.Count;
+                logger.LogInformation($"Total CouponLog ParentId updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"Invoice CouponLog ParentId update failed {e.Message}");
+                return false;
+            }
+        }
+        [HttpPut("UpdateCouponLogProductPlanId")]
+        public async Task<bool> UpdateCouponLogProductPlanId()
+        {
+            var couponLogList = await context.CouponLogs
+                .Where(x => x.ProductPlanId == null)
+                .Select(x => new CouponLog()
+                {
+                    CouponLogId = x.CouponLogId,
+                    CouponId = x.CouponId,
+                    TransactionId = x.TransactionId,
+                    AppUserId = x.AppUserId,
+                    ProductId = x.ProductId,
+                    ProductPlanId = x.ProductId,
+                    DiscountedUnitAmount = x.DiscountedUnitAmount,
+                    CouponStatus = x.CouponStatus,
+                    CreatedAt = x.CreatedAt,
+                    UpdatedAt = x.UpdatedAt
+                })
+                .ToListAsync();
+            var count = 0;
+            try
+            {
+                context.CouponLogs.UpdateRange(couponLogList);
+                await context.SaveChangesAsync();
+                count += couponLogList.Count;
+                logger.LogInformation($"Total CouponLog ProductPlanId updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"Invoice CouponLog ProductPlanId update failed {e.Message}");
+                return false;
+            }
+        }
+
+        #endregion CouponLogSection
+
+
+        #region InvoiceSection
+
+        [HttpPut("UpdateInvoiceParentId")]
+        public async Task<bool> UpdateInvoiceParentId()
+        {
+            var invoiceList = await context.Invoices
+                .Include(x => x.AppUser)
+                .Where(x => x.AppUser.GuardianId != null)
+                .Select(x => new Invoice()
+                {
+                    InvoiceId = x.InvoiceId,
+                    TransactionId = x.TransactionId,
+                    UnitAmount = x.UnitAmount,
+                    UserId = x.AppUser.GuardianId,
+                    ProductId = x.ProductId,
+                    ProductPlanId = x.ProductPlanId,
+                    Status = x.Status,
+                    PaymentMethod = x.PaymentMethod,
+                    CouponId = x.CouponId,
+                    SslTransactionId = x.SslTransactionId,
+                    BKashTransactionId = x.BKashTransactionId,
+                    CreatedAt = x.CreatedAt,
+                    UpdatedAt = x.UpdatedAt
+                })
+                .ToListAsync();
+            var count = 0;
+            try
+            {
+                context.Invoices.UpdateRange(invoiceList);
+                await context.SaveChangesAsync();
+                count += invoiceList.Count;
+                logger.LogInformation($"Total Invoices updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"Invoice update failed {e.Message}");
+                return false;
+            }
+        }
+        [HttpPut("UpdateInvoiceProductPlanId")]
+        public async Task<bool> UpdateInvoiceProductPlanId()
+        {
+            var invoiceList = await context.Invoices
+                .Where(x => x.ProductPlanId == null)
+                .Select(x => new Invoice()
+                {
+                    InvoiceId = x.InvoiceId,
+                    TransactionId = x.TransactionId,
+                    UnitAmount = x.UnitAmount,
+                    UserId = x.UserId,
+                    ProductId = x.ProductId,
+                    ProductPlanId = x.ProductId,
+                    Status = x.Status,
+                    PaymentMethod = x.PaymentMethod,
+                    CouponId = x.CouponId,
+                    SslTransactionId = x.SslTransactionId,
+                    BKashTransactionId = x.BKashTransactionId,
+                    CreatedAt = x.CreatedAt,
+                    UpdatedAt = x.UpdatedAt
+                })
+                .ToListAsync();
+            var count = 0;
+            try
+            {
+                context.Invoices.UpdateRange(invoiceList);
+                await context.SaveChangesAsync();
+                count += invoiceList.Count;
+                logger.LogInformation($"Total Invoices ProductPlanId updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"Invoice ProductPlanId update failed {e.Message}");
+                return false;
+            }
+        }
+
+        #endregion InvoiceSection
+
+        #region SslTransaction
+
+        [HttpPut("UpdateSslTransactionUserId")]
+        public async Task<bool> UpdateSslTransactionUserId()
+        {
+            var query = from s in context.SslTransactions
+                join u in context.Users
+                    on s.UserId equals u.Id
+                where u.GuardianId != null
+                select new
+                {
+                    s.SslTransactionId,
+                    s.UserId,
+                    u.GuardianId,
+                    s.ProductId,
+                    s.ProductPlanId,
+                    s.Type,
+                    s.Amount,
+                    s.StoreAmount,
+                    s.ValidationId,
+                    s.CardType,
+                    s.BankTransactionId,
+                    s.CardIssuer,
+                    s.CardBrand,
+                    s.CardIssuerCountry,
+                    s.Currency,
+                    s.CurrencyType,
+                    s.CurrencyAmount,
+                    s.RiskLevel,
+                    s.RiskTitle,
+                    s.Status
+                };
+            var sslTransactionList = await query
+                .Select(x => new SslTransaction()
+                {
+                    SslTransactionId = x.SslTransactionId,
+                    UserId = x.GuardianId,
+                    ProductId = x.ProductId,
+                    ProductPlanId = x.ProductPlanId,
+                    Type = x.Type,
+                    Amount = x.Amount,
+                    StoreAmount = x.StoreAmount,
+                    ValidationId = x.ValidationId,
+                    CardType = x.CardType,
+                    BankTransactionId = x.BankTransactionId,
+                    CardIssuer = x.CardIssuer,
+                    CardBrand = x.CardBrand,
+                    CardIssuerCountry = x.CardIssuerCountry,
+                    Currency = x.Currency,
+                    CurrencyType = x.CurrencyType,
+                    CurrencyAmount = x.CurrencyAmount,
+                    RiskLevel = x.RiskLevel,
+                    RiskTitle = x.RiskTitle,
+                    Status = x.Status
+                }).ToListAsync();
+
+            var count = 0;
+            try
+            {
+                context.SslTransactions.UpdateRange(sslTransactionList);
+                await context.SaveChangesAsync();
+                count += sslTransactionList.Count;
+                logger.LogInformation($"Total SslTransaction's User updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"SslTransaction User update failed {e.Message}");
+                return false;
+            }
+        }
+
+        [HttpPut("UpdateSslTransactionProductPlanId")]
+        public async Task<bool> UpdateSslTransactionProductPlanId()
+        {
+            var sslTransactionList = await context.SslTransactions
+                .Where(p => p.ProductPlanId == null)
+                .Select(x => new SslTransaction()
+                {
+                    SslTransactionId = x.SslTransactionId,
+                    UserId = x.UserId,
+                    ProductId = x.ProductId,
+                    ProductPlanId = x.ProductId,
+                    Type = x.Type,
+                    Amount = x.Amount,
+                    StoreAmount = x.StoreAmount,
+                    ValidationId = x.ValidationId,
+                    CardType = x.CardType,
+                    BankTransactionId = x.BankTransactionId,
+                    CardIssuer = x.CardIssuer,
+                    CardBrand = x.CardBrand,
+                    CardIssuerCountry = x.CardIssuerCountry,
+                    Currency = x.Currency,
+                    CurrencyType = x.CurrencyType,
+                    CurrencyAmount = x.CurrencyAmount,
+                    RiskLevel = x.RiskLevel,
+                    RiskTitle = x.RiskTitle,
+                    Status = x.Status
+                }).ToListAsync();
+
+            var count = 0;
+            try
+            {
+                context.SslTransactions.UpdateRange(sslTransactionList);
+                await context.SaveChangesAsync();
+                count += sslTransactionList.Count;
+                logger.LogInformation($"Total SslTransaction updated =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"SslTransaction update failed {e.Message}");
+                return false;
+            }
+        }
+
+        #endregion SslTransaction
+
+        #region SubscriptionHistory
+
+        [HttpPost("CreateSubscriptionHistory")]
+        public async Task<bool> CreateSubscriptionHistory()
+        {
+            var query = from s in context.Subscriptions
+                join i in context.Invoices on s.LastInvoiceId equals i.InvoiceId into iGroup
+                from i in iGroup.DefaultIfEmpty()
+                where s.ProductId != null
+                select new
+                {
+                    s.CollectionMethod,
+                    s.CurrentPeriodEnd,
+                    s.CurrentPeriodStart,
+                    s.CancelAtPeriodEnd,
+                    s.CancelAt,
+                    s.Status,
+                    s.UserId,
+                    s.CholporiProductId,
+                    s.ProductId,
+                    s.LastInvoiceId,
+                    s.UpdatedAt,
+                    s.CreatedAt,
+                    i.CouponId
+                };
+            
+            var subscriptionHistories =
+                await query.Select(y => new SubscriptionHistory()
+                {
+                    CollectionMethod = y.CollectionMethod,
+                    CurrentPeriodEnd = y.CurrentPeriodEnd,
+                    CurrentPeriodStart = y.CurrentPeriodStart,
+                    CancelAtPeriodEnd = y.CancelAtPeriodEnd,
+                    CancelAt = y.CancelAt,
+                    Status = y.Status,
+                    UserId = y.UserId,
+                    CholporiProductId = y.CholporiProductId,
+                    ProductPlanId = y.ProductId,
+                    InvoiceId = y.LastInvoiceId,
+                    CouponId = y.CouponId,
+                    UpdatedAt = y.UpdatedAt,
+                    CreatedAt = y.CreatedAt
+                }).ToListAsync();
+
+            var count = 0;
+            try
+            {
+                await context.SubscriptionHistories.AddRangeAsync(subscriptionHistories);
+                await context.SaveChangesAsync();
+                count += subscriptionHistories.Count;
+                logger.LogInformation($"Total Subscription history created =>>{count}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.LogError($"Subscription history creation failed {e.Message}");
+                return false;
+            }
+        }
+
+        #endregion SubscriptionHistory
+
+        #endregion PaymentModule
+
+
+        #region Login Registration
+
+        private static void UpdateStudentUserInformation(AppUser user)
+        {
+            user.PasswordHash = null;
+            user.Email = null;
+            user.PhoneNumber = null;
+            user.EmailConfirmed = false;
+            user.PhoneNumberConfirmed = false;
+            user.NormalizedEmail = null;
+        }
+
+        private static void UpdateValidParentUserInformation(AppUser user)
+        {
+            if (user.EmailConfirmed)
+            {
+                user.PhoneNumber = null;
+                user.PhoneNumberConfirmed = false;
+            }
+            else
+            {
+                user.Email = null;
+                user.EmailConfirmed = false;
+                user.NormalizedEmail = null;
+            }
+        }
+
+        private static void UpdateUnfortunateParent(AppUser user)
+        {
+            var validPhoneNumber = GetValidPhoneNumber(user.UserName);
+            if (validPhoneNumber != null)
+            {
+                user.Email = null;
+                user.NormalizedEmail = null;
+                user.EmailConfirmed = false;
+                user.PhoneNumber = validPhoneNumber;
+                user.PhoneNumberConfirmed = true;
+            }
+            else
+            {
+                var userNameIsEmail = IsValidEmail(user.UserName);
+
+                if (!userNameIsEmail) return;
+
+                user.Email = string.IsNullOrEmpty(user.Email) ? user.UserName : user.Email;
+                user.NormalizedEmail = user.Email.ToUpper();
+                user.EmailConfirmed = true;
+                user.PhoneNumber = null;
+                user.PhoneNumberConfirmed = false;
+            }
+        }
+
+        private int UpdateStudentUserRole(AppUser user)
+        {
+            var studentRoleAvailable = user.UserRoles.ToList().FirstOrDefault(x => x.Role.Name == SystemRoles.Student) != null;
+            if (studentRoleAvailable) return 0;
+
+            var anotherRoleExists = user.UserRoles.ToList().Any(x => x.Role.Name != SystemRoles.Student);
+            if (anotherRoleExists) return 0;
+
+            var result = Task.Run(async () => await userManager.AddToRoleAsync(user, SystemRoles.Student)).Result;
+            return result.Succeeded ? 1 : 0;
+        }
+
+        private int UpdateParentUserRole(AppUser user)
+        {
+            var parentRoleAvailable = user.UserRoles.ToList().FirstOrDefault(x => x.Role.Name == SystemRoles.Parent) != null;
+            if (parentRoleAvailable) return 0;
+
+            var anotherRoleExists = user.UserRoles.ToList().Any(x => x.Role.Name != SystemRoles.Parent);
+            if (anotherRoleExists) return 0;
+
+            var result = Task.Run(async () => await userManager.AddToRoleAsync(user, SystemRoles.Parent)).Result;
+            return result.Succeeded ? 1 : 0;
+        }
+
+        private static void UpdateUserTwoFactor(AppUser user)
+        {
+            user.TwoFactorEnabled = false;
+        }
+        private static void UpdateUserFirstName(AppUser user)
+        {
+            if (user == null || user?.UserRoles.Count == 0) return;
+
+            try
+            {
+                var roleName = user.UserRoles.Select(x => x.Role.Name).ToList()[0];
+
+                user.UserProfile = new UserProfile
+                {
+                    UserProfileId = user.Id,
+                    FirstName = roleName ?? "Student"
+                };
+            }
+            catch (Exception e)
+            {
+            }
+        }
+        private static bool IsValidEmail(string email)
+        {
+            var valid = true;
+
+            try
+            {
+                var emailAddress = new MailAddress(email);
+            }
+            catch
+            {
+                valid = false;
+            }
+
+            return valid;
+        }
+        private static string GetValidPhoneNumber(string phone)
+        {
+            if (phone.Length == 11 && IsValidPhoneNumber(phone)) return phone;
+
+            return null;
+        }
+        private static bool IsValidPhoneNumber(string phone)
+        {
+            try
+            {
+                var pattern = "^[0-9]+$";
+                var regex = new Regex(pattern);
+                return regex.IsMatch(phone);
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
+        }
+
+        #endregion Login Registration
+
+        private void ProcessMigration(List<AppUser> users, MigrationType migrationType, string migrationMessage = "User Data Update")
+        {
+            var totalUsers = users.Count;
+            var userUpdatedSoFar = 0;
+            var totalUserRolesUpdate = 0;
+
+            logger.LogInformation("\n\n=====================================================\n");
+            logger.LogInformation("Migration Message: {MigrationMessage}", migrationMessage);
+            logger.LogInformation("\n=======================================================\n\n");
+
+            logger.LogInformation("Total users to update: {TotalUsers}", totalUsers);
+            logger.LogInformation("\n=======================================================\n\n");
+
+            try
+            {
+                for (var i = 0; i < totalUsers; i += BatchSize)
+                {
+                    var batchUsers = users.Skip(i).Take(BatchSize).ToList();
+
+                    var retryCount = 0;
+                    var success = false;
+
+                    while (!success && retryCount < MaxRetryAttempts)
+                        try
+                        {
+                            foreach (var user in batchUsers)
+                            {
+                                switch (migrationType)
+                                {
+                                    case MigrationType.StudentUserUpdate:
+                                        UpdateStudentUserInformation(user);
+                                        break;
+                                    case MigrationType.ValidParentUserUpdate:
+                                        UpdateValidParentUserInformation(user);
+                                        break;
+                                    case MigrationType.UpdateUnfortunateParents:
+                                        UpdateUnfortunateParent(user);
+                                        break;
+                                    case MigrationType.UpdateUserTwoFactor:
+                                        UpdateUserTwoFactor(user);
+                                        break;
+                                    case MigrationType.UpdateUserFirstName:
+                                        UpdateUserFirstName(user);
+                                        break;
+                                    case MigrationType.DeleteInvalidStudent:
+                                        DeleteAndLogUserInfo(user.Id, ref userUpdatedSoFar);
+                                        break;
+                                    case MigrationType.DeleteInvalidUserStudent:
+                                        DeleteInvalidParentUser(user.Id, ref userUpdatedSoFar);
+                                        break;
+                                    case MigrationType.DeleteInvalidUser:
+                                        DeleteAndLogUserInfo(user.Id, ref userUpdatedSoFar);
+                                        break;
+                                    case MigrationType.UpdateStudentUserRole:
+                                        totalUserRolesUpdate += UpdateStudentUserRole(user);
+                                        break;
+                                    case MigrationType.UpdateParentUserRole:
+                                        totalUserRolesUpdate += UpdateParentUserRole(user);
+                                        break;
+                                    default:
+                                        throw new ArgumentOutOfRangeException(nameof(migrationType), migrationType, null);
+                                }
+
+                                if (migrationType is MigrationType.UpdateStudentUserRole or MigrationType.UpdateParentUserRole)
+                                {
+                                    logger.LogInformation("User {UserId} role updated successfully, No -> {TotalUserRolesUpdate}", user.Id,
+                                        totalUserRolesUpdate);
+                                }
+                                else
+                                {
+                                    UpdateAndLogUserInfo(user, ref userUpdatedSoFar);
+                                }
+
+                            }
+
+                            success = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogInformation("An error occurred during database update: {ExMessage}", ex.Message);
+                            logger.LogInformation(
+                                "Retry attempt {RetryCount} of {MaxRetryAttempts}. Retrying after {RetryIntervalTotalSeconds} seconds...",
+                                retryCount + 1, MaxRetryAttempts, RetryInterval.TotalSeconds);
+                            Thread.Sleep(RetryInterval);
+                            retryCount++;
+                        }
+
+                    if (retryCount >= MaxRetryAttempts)
+                    {
+                        logger.LogInformation("Maximum retry attempts reached. Migration script failed");
+                        return;
+                    }
+
+                    if (i + BatchSize >= totalUsers) continue;
+
+                    logger.LogInformation("Sleeping for {SleepIntervalTotalSeconds} seconds before the next batch...",
+                        SleepInterval.TotalSeconds);
+                    Thread.Sleep(SleepInterval);
+                }
+
+                logger.LogInformation("Migration script completed successfully");
+            }
+            catch (Exception ex)
+            {
+                logger.LogInformation("An error occurred during the migration: {ExMessage}", ex.Message);
+            }
+        }
+        private void UpdateAndLogUserInfo(AppUser user, ref int userUpdatedSoFar)
+        {
+            var result = userManager.UpdateAsync(user).Result;
+
+            if (result.Succeeded)
+            {
+                userUpdatedSoFar++;
+                logger.LogInformation("User {UserId} updated successfully, No -> {UserUpdatedSoFar}", user.Id,
+                    userUpdatedSoFar);
+            }
+            else
+            {
+                logger.LogInformation("Failed to update user {UserId}: {Join}", user.Id,
+                    string.Join(", ", result.Errors));
+            }
+        }
+        private void DeleteInvalidParentUser(string userId, ref int userUpdatedSoFar)
+        {
+            var students = userManager.Users.Where(x => x.GuardianId == userId).ToList();
+            foreach (var student in students)
+            {
+                DeleteAndLogUserInfo(student.Id, ref userUpdatedSoFar);
+            }
+        }
+        private void DeleteAndLogUserInfo(string userId, ref int userUpdatedSoFar)
+        {
+            var user = Task.Run(async () => await userManager.FindByIdAsync(userId)).Result;
+            var result = Task.Run(async () => await userManager.DeleteAsync(user)).Result;
+
+            if (result.Succeeded)
+            {
+                userUpdatedSoFar++;
+                logger.LogInformation("User {UserId} deleted successfully, No -> {UserUpdatedSoFar}", user.Id,
+                    userUpdatedSoFar);
+            }
+            else
+            {
+                logger.LogInformation("Failed to delete user {UserId}: {Join}", user.Id,
+                    string.Join(", ", result.Errors));
+            }
+        }
+
+        private enum MigrationType
+        {
+            StudentUserUpdate = 1,
+            UpdateStudentUserRole = 6,
+            ValidParentUserUpdate = 2,
+            UpdateUnfortunateParents = 4,
+            UpdateParentUserRole = 5,
+            UpdateUserTwoFactor = 7,
+            UpdateUserFirstName = 8,
+            DeleteInvalidStudent = 9,
+            DeleteInvalidUserStudent = 10,
+            DeleteInvalidUser = 11,
+        }
+    }
+}

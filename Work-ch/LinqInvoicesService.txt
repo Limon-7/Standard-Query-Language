@@ -1,0 +1,95 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Core.Params;
+using DataModel.Dto.Response;
+using Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+
+namespace Infrastructure.Services
+{
+    public class InvoiceQueryService
+    {
+        private readonly StoreContext storeContext;
+        public InvoiceQueryService(StoreContext storeContext)
+        {
+            this.storeContext = storeContext;
+
+        }
+        /// <summary>
+        /// GetAllInvoicesList() will return list of Invoices for Admin User
+        /// </summary>
+        /// <param name="invoiceParams"></param>
+        /// <returns></returns>
+        public async Task<List<InvoiceResponse>> GetAllInvoicesAsync(InvoiceParams invoiceParams)
+        {
+            var query = (from i in storeContext.Invoices
+                    join u in storeContext.Users
+                        on i.UserId equals u.Id
+                    join pp in storeContext.ProductPlans
+                        on i.ProductPlanId equals pp.ProductPlanId
+                    join cp in storeContext.CholporiProducts
+                        on pp.CholporiProductId equals cp.CholporiProductId
+                    where (string.IsNullOrEmpty(invoiceParams.Search) || (i.UserId == invoiceParams.UserId) ||
+                           (i.InvoiceId == invoiceParams.Search)) &&
+                          ((invoiceParams.Status).Equals(null) || i.Status.Equals(invoiceParams.Status))
+                    select new InvoiceResponse
+                    {
+                        InvoiceId = i.InvoiceId,
+                        TransactionId = i.TransactionId,
+                        UnitAmount = i.UnitAmount,
+                        UserId = i.UserId,
+                        UserName = u.UserName,
+                        UserAvatar = u.Avatar,
+                        Status = i.Status,
+                        PaymentMethod = i.PaymentMethod,
+                        SslTransactionId = i.SslTransactionId,
+                        BKashTransactionId = i.BKashTransactionId,
+                        ProductPlanId = pp.ProductPlanId,
+                        ProductPlanNameEn = pp.NameEn,
+                        ProductPlanNameBn = pp.NameBn,
+                        CholporiProductNameEn = cp.NameEn,
+                        CholporiProductNameBn = cp.NameBn,
+                        RecurringInterval = pp.RecurringInterval,
+                        RecurringCount = pp.RecurringCount,
+                        CreatedAt = i.CreatedAt
+                    }).OrderBy(x => x.CreatedAt)
+                .Skip((invoiceParams.PageIndex - 1) * invoiceParams.PageSize).Take(invoiceParams.PageSize);
+            var data = await query.ToListAsync();
+            return data;
+        }
+        /// <summary>
+        ///     This function will return list of Invoice for user
+        /// </summary>
+        /// <param name="invoiceParams"></param>
+        /// <returns></returns>
+        public async Task<List<InvoiceShortResponse>> GetInvoiceShortInfoAsync(InvoiceParams invoiceParams)
+        {
+            var query = (from i in storeContext.Invoices
+                    join pp in storeContext.ProductPlans
+                        on i.ProductPlanId equals pp.ProductPlanId
+                    join cp in storeContext.CholporiProducts
+                        on pp.CholporiProductId equals cp.CholporiProductId
+                    where i.UserId == invoiceParams.UserId && (string.IsNullOrEmpty(invoiceParams.Search) ||
+                                                               i.InvoiceId.ToLower().Contains(invoiceParams.Search))
+                    select new InvoiceShortResponse
+                    {
+                        TransactionId = i.TransactionId,
+                        UnitAmount = i.UnitAmount,
+                        ProductPlanId = i.ProductPlanId,
+                        ProductPlanNameEn = pp.NameEn,
+                        ProductPlanNameBn = pp.NameBn,
+                        RecurringInterval = pp.RecurringInterval,
+                        RecurringCount = pp.RecurringCount,
+                        CholporiProductNameEn = cp.NameEn,
+                        CholporiProductNameBn = cp.NameBn,
+                        Status = i.Status,
+                        CreatedAt = i.CreatedAt
+                    }).OrderBy(x => x.CreatedAt)
+                .Skip((invoiceParams.PageIndex - 1) * invoiceParams.PageSize).Take(invoiceParams.PageSize);
+            var data = await query.ToListAsync();
+            return data;
+        }
+    }
+}
