@@ -1,0 +1,332 @@
+import { Injectable } from '@angular/core';
+import { environment } from 'environments/environment';
+import { Attachments, Emails } from './mails.model';
+import { BehaviorSubject, of } from 'rxjs';
+
+
+declare var gapi: any;
+@Injectable({
+  providedIn: 'root'
+})
+export class GoogleAuthService {
+  /*
+   @Api key section
+   */
+
+  apiKey = "AIzaSyDfhxC1tEjEZDsrV1Dljj_hnFJYCXcpzxQ";
+  discoveryDocs = ['https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest'];
+  clientId = "745580221315-3lk6ercnooj0lf8b518n8stfava81rib.apps.googleusercontent.com";
+  SCOPES = 'https://mail.google.com/ https://www.googleapis.com/auth/gmail.readonly';
+  stateFlag: boolean;
+
+  /* 
+  @mailbox service section
+  */
+  sentMail: any[];
+  labels: any[] = [];
+  emails: Emails[] = [];
+  getToken: any;
+  // changed label
+  private labelChageSubject = new BehaviorSubject<string>('INBOX');
+  labelChanged$ = this.labelChageSubject.asObservable();
+  // changed
+  private folderChageSubject = new BehaviorSubject<string>('');
+  folderChanged$ = this.folderChageSubject.asObservable();
+
+  private selectedMailSubject = new BehaviorSubject<Emails | null>(null);
+  selectedMailAction$ = this.selectedMailSubject.asObservable();
+
+  private searchEmailSubject = new BehaviorSubject<String>('');
+  searchEmailSubjectAction$ = this.searchEmailSubject.asObservable();
+
+  searchEmailChange(searchText: string): void {
+    this.searchEmailSubject.next(searchText);
+  }
+
+  selectedEmailChange(selectedEmail: Emails | null): void {
+    this.selectedMailSubject.next(selectedEmail);
+  }
+  selectedEmailFolder(folderId: string): void {
+    this.folderChageSubject.next(folderId);
+  }
+  // for labels
+  selectedEmailLabel(label: string): void {
+    this.labelChageSubject.next(label);
+  }
+
+  /* 
+    @end mailbox service section
+    */
+  constructor() {
+    this.initClient();
+  }
+  initClient(): void {
+    gapi.load('client', () => {
+      gapi.client.init({
+        apiKey: this.apiKey,
+        clientId: this.clientId,
+        discoveryDocs: this.discoveryDocs,
+        // scope for G Calendar can be found at https://developers.google.com/identity/protocols/googlescopes
+        // scope: 'https://www.googleapis.com/auth/calendar'
+        // https://www.googleapis.com/auth/gmail.readonly
+        scope: this.SCOPES
+      });
+      gapi.client.load('gmail', 'v1', () => console.log('Gmail API loaded'));
+    });
+  }
+  /* login */
+  async login(): Promise<any> {
+    const googleAuth = gapi.auth2.getAuthInstance();
+    const googleUser = await googleAuth.signIn();
+    const currentuser = googleAuth.currentUser.get().getAuthResponse();
+    localStorage.setItem('accessToken', currentuser.access_token);
+
+
+    // console.log('Current User:', currentuser);
+    // console.log('ID: ' + googleUser.getId());
+    this.getToken = googleUser.getAuthResponse().access_token;
+    // console.log('token', token);
+    console.log('login successfully');
+    // this.GetLabel();
+
+    // Sel login and logout flag
+    this.toggleFlagTrue();
+    return this.stateFlag;
+  }
+  /* Logout */
+  logout(): void {
+    gapi.auth2.getAuthInstance().signOut();
+    this.toggleFlagFalse();
+    console.log('logout Successfully');
+  }
+
+  // Checked login
+  toggleFlagFalse(): void {
+    this.stateFlag = false;
+  }
+  // Checked login
+  toggleFlagTrue(): void {
+    this.stateFlag = true;
+  }
+
+
+  /* Get labels */
+  GetLabel(): void {
+    if (!this.stateFlag) {
+      return;
+    }
+    gapi.client.gmail.users.labels.list({
+      'userId': 'me'
+    }).then((response) => {
+
+      // this.labels = response.result.labels;
+      const labels = response.result.labels;
+      // console.log('labels:', labels);
+      for (const label of labels) {
+        if (label.type !== 'system') {
+          this.labels.push(label);
+        }
+      }
+      console.log('Custom labels:', this.labels);
+      // if (labels && labels.length > 0) {
+      //   for (let i = 0; i < labels.length; i++) {
+      //     const label = labels[i];
+      //     // console.log('label:', label);
+      //     // appendPre(label.name)
+      //   }
+      // } else {
+      //   // appendPre('No Labels found.');
+      // }
+    }).catch(err => console.log(err));
+  }
+
+
+  /* Fetch Messages */
+  GetInbox(labelId: string): any {
+    if (!this.stateFlag) {
+      return;
+    }
+    this.emails = [];
+    // const labelIds = labelId.toUpperCase();
+    const request = gapi.client.gmail.users.messages.list({
+      userId: 'me',
+      format: 'full',
+      maxResults: 100,
+      labelIds: labelId,
+    });
+    request.execute(res => {
+      console.log('Result', res);
+      const messageLength: any[] = res.messages;
+      if (res.result.resultSizeEstimate === 0) {
+        this.emails = [];
+      }
+      else {
+        for (const mess of res.messages) {
+          const messageRequest = gapi.client.gmail.users.messages.get({
+            userId: 'me',
+            id: mess.id,
+          }).then(result => {
+            const base64 = require('js-base64').Base64;
+            let to: string;
+            let from: string;
+            let fromName: string;
+            let subject: string;
+            let date: Date;
+            let body: any;
+            const snippet = result.result.snippet;
+            const attachments: Attachments[] = [];
+            let replyTo: string;
+            let fileName: string;
+            let fileType: string;
+            let fileSource: string;
+            const payloads = result.result.payload;
+            const messageId = result.result.id;
+            const labels = result.result.labelIds;
+            
+            if (labels.length === 1) {
+              console.log('getting labels:', labels);
+              if (payloads == null) {
+                console.log('Message has no payload with ID:', result.result.id);
+              }
+              /* getting mails header */
+              else {
+                for (const item of result.result.payload.headers) {
+
+                  if (item.name === 'To') {
+                    to = item.value;
+                  }
+                  if (item.name === 'From') {
+                    if (item.value.includes('<')) {
+                      const v = item.value.split(' <');
+                      fromName = v[0];
+                      from = item.value.substring(
+                        item.value.lastIndexOf('<') + 1,
+                        item.value.lastIndexOf('>')
+                      );
+                    } else {
+                      const v = item.value.split('@');
+                      fromName = v[0];
+                      from = item.value;
+                    }
+
+                  }
+                  if (item.name === 'Subject') {
+                    subject = item.value;
+                  }
+                  if (item.name === 'Date') {
+                    date = item.value;
+                  }
+                  if (item.name.toLowerCase() === 'reply-to') {
+                    replyTo = item.value;
+                  }
+                  if (item.name.toLowerCase() !== 'reply-to') {
+                    replyTo = from;
+                  }
+                }
+              }
+
+              /* multippart */
+              if (result.result.payload.parts) {
+                for (const part of result.result.payload.parts) {
+                  if (part.mimeType === 'text/html') {
+                    body = part.body.data;
+                    body = base64.decode(body.replace(/-/g, '+').replace(/_/g, '/'));
+                    // body = decodeURIComponent(escape(atob(body.replace(/\-/g, '+').replace(/\_/g, '/'))));
+                  }
+                  if (part.mimeType !== 'text/html' && part.mimeType === 'text/plain') {
+                    body = part.body.data;
+                    body = base64.decode(body.replace(/-/g, '+').replace(/_/g, '/'));
+                  }
+                  if (part.filename && part.filename.length > 0) {
+                    const attachmentId = part.body.attachmentId;
+                    gapi.client.gmail.users.messages.attachments.get({
+                      'id': attachmentId,
+                      'messageId': messageId,
+                      'userId': 'me'
+                    }).then(file => {
+                      fileName = part.filename;
+                      fileType = part.mimeType;
+                      fileSource = file.result.data;
+                      fileSource = fileSource.replace(/-/g, '+').replace(/_/g, '/');
+                      fileSource = `data:${fileType};base64,${fileSource}`;
+                      const files = new Attachments(fileName, fileType, fileSource);
+                      attachments.push(files);
+                    });
+                  }
+                }
+              }
+              // console.log('Id:', messageId);
+              // console.log('Id:', labels);
+              // console.log('from:', from);
+              // console.log('To:', to);
+              const mail = new Emails(messageId, from, fromName, to, subject, date, body, labels, snippet, attachments, replyTo);
+              this.emails.push(mail);
+            }
+          }).catch(err => console.log(err));
+        }
+      }
+    });
+    console.log('Inbox Mails:', this.emails);
+    return this.emails;
+  }
+
+
+  /* Mail send */
+  SendMail(mailData: any): void {
+    const mail = mailData.join('');
+    console.log('Actuall Data-After joining:', mail);
+
+    const path = 'upload/gmail/v1/users/me/messages/send';
+    gapi.client.request({
+      path: path,
+      headers: {
+        'Content-Type': 'message/rfc822'
+      },
+      method: 'POST',
+      body: mail
+    }).then(response => {
+      console.log('REsponse:', response);
+    }).catch(err => {
+      console.log('Error:', err);
+    });
+  }
+
+  GetMessageById(id: string): void {
+    if (!this.stateFlag) {
+      return;
+    }
+    const messageRequest = gapi.client.gmail.users.messages.get({
+      userId: 'me',
+      id: id,
+
+    });
+    messageRequest.execute();
+    // console.log('171ca847ba5ca853:');
+  }
+
+  GetAttachMentById(attachId: string, messageId: string): void {
+    let attachment = gapi.client.gmail.users.messages.attachments.get({
+      'id': attachId,
+      'messageId': messageId,
+      'userId': 'me'
+    }).then(
+
+    );
+  }
+
+  async getCalendar(): Promise<any> {
+
+    if (!this.stateFlag) {
+      return;
+    }
+
+    const events = await gapi.client.calendar.events.list({
+      calendarId: 'primary',
+      timeMin: new Date().toISOString(),
+      showDeleted: false,
+      singleEvents: true,
+      maxResults: 100,
+      orderBy: 'startTime'
+    });
+  }
+}

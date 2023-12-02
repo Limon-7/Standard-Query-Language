@@ -1,0 +1,631 @@
+        private List<ReceivedEmail> GetAllEmails_Imap(string host, int port, string user, string pass, MailKit.Security.SecureSocketOptions socketOption, List<string> refCodes, List<string> listEmailIDs)
+        {
+            List<ReceivedEmail> retlist = new List<ReceivedEmail>();
+            if (_loglevel > 2) { WriteInfoLog(string.Format("Reading Emails: IMap: for {0} ", user)); }
+
+            try
+            {
+                using (var client = new ImapClient())
+                {
+                    client.Connect(host, port, socketOption);
+                    if (_loglevel > 2) { WriteInfoLog(string.Format("---Imap: Connected: {0}: ", user)); }
+
+                    client.AuthenticationMechanisms.Remove("XOAUTH2");
+                    client.Authenticate(user, pass);
+                    if (_loglevel > 2) { WriteInfoLog(string.Format("---Imap: Authenticated: {0}: ", user)); }
+
+                    var inbox = client.Inbox;
+                    inbox.Open(FolderAccess.ReadOnly);
+
+                    var uids = client.Inbox.Search(SearchQuery.All);
+                    for (int i = 0; i < uids.Count; i++)
+                    {
+                        try
+                        {
+                            UniqueId uid = uids[i];
+
+                            if (listEmailIDs.Contains(uid.Id.ToString())) continue;
+
+                            var message = inbox.GetMessage(uid);
+                            if (_loglevel > 2) { WriteInfoLog(string.Format("---Imap: Message received: {0}: ", uid)); }
+
+                            ReceivedEmail email = new ReceivedEmail() { MessageID = message.MessageId, Message = message, RefCode = "", HasAttachment = message.Attachments.Count() > 0 ? true : false };
+
+                            List<string> matches = refCodes.Where(x => message.Subject.ToLower().Contains(x.ToLower())).ToList();
+                            if (matches.Count > 0)
+                            {
+                                email.ClientJobID = 0;
+                                email.RefCode = matches[0];
+                                email.ProcessedAssigned = true;
+                                email.AssignCode = "applicant";
+                            }
+
+                            retlist.Add(email);
+                        }
+                        catch (Exception ex) { LogEx(ex); }
+                    }
+
+                    client.Disconnect(true);
+                    if (_loglevel > 2) { WriteInfoLog(string.Format("---Imap: Disconnected: {0} ", user)); }
+                }
+
+            }
+            catch (Exception ex) { LogEx(ex); }
+            if (_loglevel > 2) { WriteInfoLog(string.Format("GetAllEmails_Pop3: Reading Emails completed: IMap: for {0} ", user)); }
+            return retlist;
+        }
+        private List<ReceivedEmail> GetAllEmails_Pop3(string host, int port, string user, string pass, MailKit.Security.SecureSocketOptions socketOption, List<string> listEmailIDs)
+        {
+            List<ReceivedEmail> retlist = new List<ReceivedEmail>();
+
+            if (_loglevel > 2) { WriteInfoLog(string.Format("GetAllEmails_Pop3: Reading Emails: Pop3: for {0} ", user)); }
+            try
+            {
+                using (var client = new Pop3Client())
+                {
+                    client.Connect(host, port, socketOption);
+                    if (_loglevel > 2) { WriteInfoLog(string.Format("---Pop3: Connected: {0} ", user)); }
+
+                    client.AuthenticationMechanisms.Remove("XOAUTH2");
+                    client.Authenticate(user, pass);
+                    if (_loglevel > 2) { WriteInfoLog(string.Format("---Pop3: Authenticated: {0} ", user)); }
+
+
+                    for (int i = 0; i < client.Count; i++)
+                    {
+                        // Get header first and check if the message was already processed previously
+                        if (client.Capabilities.HasFlag(Pop3Capabilities.Top))
+                        {
+                            if (_loglevel > 2) { WriteInfoLog(string.Format("---GetAllEmails_Pop3: Getting Headers for : {0} ", i)); }
+
+                            var headers = client.GetMessageHeaders(i);
+                            if (headers != null)
+                            {
+                                string msgid = headers[HeaderId.MessageId];
+                                if (!string.IsNullOrEmpty(msgid))
+                                {
+                                    msgid = msgid.Substring(1, msgid.Length - 2);
+                                    if (_loglevel > 2) { WriteInfoLog(string.Format("---GetAllEmails_Pop3: MessageId from headers: {0} ", msgid)); }
+
+                                    if (listEmailIDs.Contains(msgid))
+                                    {
+                                        if (_loglevel > 2) { WriteInfoLog(string.Format("---GetAllEmails_Pop3: Get Header: Message already exists: {0} ", i)); }
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+
+                        var message = client.GetMessage(i);
+                        if (_loglevel > 2) { WriteInfoLog(string.Format("---Pop3: Message received: {0} ", i)); }
+
+                        if (message != null)
+                        {
+                            if (!listEmailIDs.Contains(message.MessageId))
+                            {
+                                ReceivedEmail email = new ReceivedEmail()
+                                {
+                                    MessageID = message.MessageId,
+                                    Message = message,
+                                    RefCode = "",
+                                    HasAttachment = message.Attachments.Count() > 0 ? true : false
+                                };
+
+                                retlist.Add(email);
+                            }
+                        }
+                    }
+
+
+                    client.Disconnect(true);
+                    if (_loglevel > 2) { WriteInfoLog(string.Format("---Pop3: Disconnected: {0}: ", user)); }
+                }
+
+            }
+            catch (Exception ex) { LogEx(ex, host, user); }
+
+            if (_loglevel > 2) { WriteInfoLog(string.Format("Reading Emails completed: Pop3: for {0} ", user)); }
+            return retlist;
+        }
+
+	public async Task SendRequestEmailAsync(CampaignEmail mailData, string connString, string clientID, string urlBasePath)
+        {
+            try
+            {
+                // Validate given email first
+                if (mailData == null) return;
+                if (string.IsNullOrWhiteSpace(mailData.EmailSubject)) return;
+                if (string.IsNullOrWhiteSpace(mailData.EmailAddress)) return;
+
+                // Don't send dummy emails
+                if (mailData.EmailAddress.EndsWith("@noemail.org"))
+                {
+                    try
+                    {
+                        using (SqlConnection conn = new SqlConnection(connString))
+                        {
+                            int sendSuccess = 1;
+                            int deliveredSuccess = 1;
+                            string dateNow = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff");
+
+                            conn.Open();
+                            string sql = "update CampaignEmails set Sent = @Sent, SentDate = @SentDate, Delivered = @Delivered, DeliveryFailureMsg = @DeliveryFailureMsg where CampaignEmailID = @CampaignEmailID";
+
+                            SqlCommand c = new SqlCommand(sql, conn);
+                            c.CommandTimeout = (10 * 60 * 1000);
+                            c.Parameters.Add(new SqlParameter("@Sent", sendSuccess));
+                            c.Parameters.Add(new SqlParameter("@SentDate", dateNow));
+                            c.Parameters.Add(new SqlParameter("@Delivered", deliveredSuccess));
+                            c.Parameters.Add(new SqlParameter("@DeliveryFailureMsg", ""));
+                            c.Parameters.Add(new SqlParameter("@CampaignEmailID", mailData.CampaignEmailID));
+                            int i = c.ExecuteNonQuery();
+
+                            conn.Close();
+                            conn.Dispose();
+                        }
+
+                    }
+                    catch (SqlException ex)
+                    {
+                        if (ex.Number == -2) // SQL Server timeout
+                        {
+                            LogEx(new Exception("***** SERVICE STOPPED *****"), "ALL", "system", EventLogEntryType.Error, "error");
+                            this.Stop();
+                        }
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(mailData.UserID))
+                {
+                    WriteInfoLog(string.Format("Email without UserID detected. CampaignEmailID: {0}", mailData.CampaignEmailID), clientID);
+                    return;
+                }
+
+                // Email Server Settings
+                string smtpServer = GetUserSettingValue("user.mail.smtp.server", connString, "", mailData.UserID);
+                int smtpPort = int.Parse(GetUserSettingValue("user.mail.smtp.port", connString, "0", mailData.UserID));
+                int smtpSSLType = int.Parse(GetUserSettingValue("user.mail.smtp.ssltype", connString, "2", mailData.UserID)); // default = 2 = TLS
+                string smtpLogin = GetUserSettingValue("user.mail.smtp.login", connString, "", mailData.UserID);
+                string smtpPassword = GetUserSettingValue("user.mail.smtp.password", connString, "", mailData.UserID);
+                string smtpSender = GetUserSettingValue("user.mail.smtp.email", connString, "", mailData.UserID);
+
+                if (string.IsNullOrEmpty(smtpServer)) { return; }
+                if (string.IsNullOrEmpty(smtpLogin)) { return; }
+                if (string.IsNullOrEmpty(smtpPassword)) { return; }
+
+                #region Prepre Email Settings
+
+                // Set default email type
+                if (mailData.EmailType == null) mailData.EmailType = 0;
+
+                mailData.Sender = smtpLogin.Trim();
+                mailData.ReplyTo = smtpLogin.Trim();
+
+                if (!string.IsNullOrWhiteSpace(smtpSender))
+                {
+                    mailData.Sender = smtpSender;
+                    mailData.ReplyTo = smtpSender;
+                }
+
+                //if (smtpLogin.Contains(@"\"))
+                //{
+                //    mailData.Sender = mailData.UserID;
+                //    mailData.ReplyTo = mailData.UserID;
+                //}
+
+                switch (mailData.EmailType)
+                {
+                    default:
+                        {
+                            // Default Emails
+                            string defaultReplyTo = GetUserSettingValue("mail.default.replyto", connString);
+                            string defaultSender = GetUserSettingValue("mail.default.sender", connString);
+
+                            if (!string.IsNullOrEmpty(defaultReplyTo)) { mailData.ReplyTo = defaultReplyTo.Trim(); }
+                            if (!string.IsNullOrEmpty(defaultSender)) { mailData.Sender = defaultSender.Trim(); }
+
+                            break;
+                        }
+                    case 1:
+                        {
+                            string marketingReplyTo = GetUserSettingValue("mail.marketing.replyto", connString);
+                            string marketingSender = GetUserSettingValue("mail.marketing.sender", connString);
+
+                            if (!string.IsNullOrEmpty(marketingReplyTo)) { mailData.ReplyTo = marketingReplyTo.Trim(); }
+                            if (!string.IsNullOrEmpty(marketingReplyTo)) { mailData.Sender = marketingSender.Trim(); }
+
+                            mailData.CustomHeader_CustomData = mailData.TargetListID.ToString();
+                            mailData.CustomHeader_RefID = mailData.CampaignEmailID.ToString();
+                            mailData.CustomHeader_Token = mailData.Token;
+
+                            break;
+                        }
+                }
+
+                //mailData.NotificationHeader_ConfirmReadingTo = mailData.Sender;
+                //mailData.NotificationHeader_DispositionNotificationTo = mailData.Sender;
+                //mailData.NotificationHeader_ReadReceiptTo = mailData.Sender;
+                //mailData.NotificationHeader_ReturnReceiptTo = mailData.Sender;
+                mailData.CustomHeader_Company = GetUserSettingValue("user.company.name", connString);
+
+                if (string.IsNullOrEmpty(mailData.ReplyTo)) { mailData.ReplyTo = mailData.Sender; }
+                if (!mailData.ReplyTo.Contains("@")) { mailData.ReplyTo = mailData.Sender; }
+
+                #endregion
+
+                //string senderName = GetUserSettingValue("mail.default.sender.name", connString, "" );
+                //if (string.IsNullOrEmpty(senderName)) { senderName = mailData.Sender; }
+
+                if (mailData.EmailAddress.ToLower().Contains("@hotmail.")) { mailData.ReplyTo = mailData.Sender; }
+                if (mailData.EmailAddress.ToLower().Contains("@live.")) { mailData.ReplyTo = mailData.Sender; }
+
+                MimeMessage msg = new MimeMessage();
+                //msg.From.Add(new MailboxAddress(senderName, mailData.Sender));
+                //msg.Sender = new MailboxAddress(senderName, mailData.Sender);
+                msg.From.Add(new MailboxAddress(mailData.Sender, mailData.Sender));
+                msg.Sender = new MailboxAddress(mailData.Sender, mailData.Sender);
+
+                //msg.ReplyTo.Add(new MailboxAddress(senderName, mailData.ReplyTo));
+                msg.ReplyTo.Add(new MailboxAddress(mailData.ReplyTo, mailData.ReplyTo));
+
+                string[] emailAddresses = mailData.EmailAddress.Split(new string[] { ";" }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string emailAddress in emailAddresses)
+                {
+                    msg.To.Add(new MailboxAddress(emailAddress.Trim(), emailAddress.Trim()));
+                    //msg.To.Add(new MailboxAddress(string.Empty,emailAddress.Trim()));
+                }
+
+                if (!string.IsNullOrEmpty(mailData.EmailAddressCC))
+                {
+                    string[] emailAddressesCC = mailData.EmailAddressCC.Split(new string[] { ";" }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (string emailAddress in emailAddressesCC) { msg.Cc.Add(new MailboxAddress(emailAddress.Trim(), emailAddress.Trim())); }
+                }
+
+                if (!string.IsNullOrEmpty(mailData.EmailAddressBCC))
+                {
+                    string[] emailAddressesBCC = mailData.EmailAddressBCC.Split(new string[] { ";" }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (string emailAddress in emailAddressesBCC) { msg.Bcc.Add(new MailboxAddress(emailAddress.Trim(), emailAddress.Trim())); }
+                }
+
+                string sendCopyTo = GetUserSettingValue("user.mail.sendcopyto", connString);
+                if (!string.IsNullOrEmpty(sendCopyTo)) { msg.Bcc.Add(new MailboxAddress(sendCopyTo, sendCopyTo)); }
+
+                msg.Subject = mailData.EmailSubject ?? "(No Subject)";
+                msg.Priority = MessagePriority.Normal;
+
+                var multipart = new Multipart("mixed");
+
+                #region Check containing links
+                if (!string.IsNullOrEmpty(urlBasePath))
+                {
+                    if (!urlBasePath.EndsWith("/")) { urlBasePath = urlBasePath + "/"; }
+
+                    string html = mailData.EmailContent;
+
+                    try
+                    {
+                        #region Search for A-HREF
+                        Regex r = new Regex(@"<a.*?href=(""|')(?<href>.*?)(""|').*?>(?<value>.*?)</a>");
+
+                        foreach (Match match in r.Matches(html))
+                        {
+                            string href = match.Groups["href"].Value;
+                            string linkText = match.Groups["value"].Value;
+
+                            if (href.StartsWith(@"../../"))
+                            {
+
+                                string newlink = href.Replace(@"../../", urlBasePath);
+                                html = html.Replace(href, newlink);
+                            }
+                        }
+                        #endregion
+
+                        #region Search for IMG
+                        Regex rImg = new Regex(@"<img.+?src=[\""'](.+?)[\""'].*?>");
+
+                        foreach (Match match in rImg.Matches(html))
+                        {
+                            string href = match.Groups[1].Value;
+
+                            if (href.StartsWith(@"../../"))
+                            {
+                                string newlink = href.Replace(@"../../", urlBasePath);
+                                html = html.Replace(href, newlink);
+                            }
+                        }
+                        #endregion
+                    }
+                    catch (Exception ex) { LogEx(ex, clientID, ""); }
+
+                    mailData.EmailContent = html;
+                }
+                #endregion
+
+
+                string emailContent = mailData.EmailContent;
+
+                //replace lf with crlf (office365 exchange issue)
+                emailContent = emailContent.Replace("(?<!\r)\n", "\r\n");
+
+                try { emailContent = ExtractBase64Images(emailContent, connString, clientID); }
+                catch (Exception ex) { LogEx(ex); emailContent = mailData.EmailContent; }
+
+                BodyBuilder builder = new BodyBuilder();
+                builder.HtmlBody = emailContent;
+                //msg.Body = builder.ToMessageBody();
+
+                multipart.Add(builder.ToMessageBody());
+
+
+                //mail.BodyEncoding = System.Text.Encoding.UTF8;
+                //mail.SubjectEncoding = System.Text.Encoding.UTF8;
+                //mail.DeliveryNotificationOptions = DeliveryNotificationOptions.OnSuccess | DeliveryNotificationOptions.Delay | DeliveryNotificationOptions.OnFailure;
+
+                // Add Notification Headers
+                if (!string.IsNullOrEmpty(mailData.NotificationHeader_DispositionNotificationTo)) msg.Headers.Add("Disposition-Notification-To", mailData.NotificationHeader_DispositionNotificationTo.ToString());
+                if (!string.IsNullOrEmpty(mailData.NotificationHeader_ConfirmReadingTo)) msg.Headers.Add("Confirm-Reading-To", mailData.NotificationHeader_ConfirmReadingTo.ToString());
+                if (!string.IsNullOrEmpty(mailData.NotificationHeader_ReadReceiptTo)) msg.Headers.Add("Read-Receipt-To", mailData.NotificationHeader_ReadReceiptTo.ToString());
+                if (!string.IsNullOrEmpty(mailData.NotificationHeader_ReturnReceiptTo)) msg.Headers.Add("Return-Receipt-To", mailData.NotificationHeader_ReturnReceiptTo.ToString());
+
+
+                // Add some custom headers
+                if (!string.IsNullOrEmpty(mailData.CustomHeader_Company)) msg.Headers.Add("X-Mailer", "jobdesk");
+                if (!string.IsNullOrEmpty(mailData.CustomHeader_Company)) msg.Headers.Add("X-COMPANY", mailData.CustomHeader_Company.ToString());
+                if (!string.IsNullOrEmpty(mailData.CustomHeader_RefID)) msg.Headers.Add("X-Ref-ID", mailData.CustomHeader_RefID.ToString());
+                if (!string.IsNullOrEmpty(mailData.CustomHeader_CustomData)) msg.Headers.Add("X-Mail-CustomData", mailData.CustomHeader_CustomData.ToString());
+                if (!string.IsNullOrEmpty(mailData.CustomHeader_Token)) msg.Headers.Add("X-TOKEN", mailData.CustomHeader_Token.ToString());
+
+
+                // Add attachements
+                if (mailData.Attachment != null && mailData.Attachment.FileData != null)
+                {
+                    // Create attachment from email document
+                    var attSingle = new MimePart(mailData.Attachment.MimeType);
+                    attSingle.ContentObject = new ContentObject(new MemoryStream(mailData.Attachment.FileData), ContentEncoding.Default);
+                    attSingle.ContentTransferEncoding = ContentEncoding.Base64;
+                    attSingle.ContentDisposition = new ContentDisposition(ContentDisposition.Attachment);
+                    //attSingle.ContentTransferEncoding = ContentEncoding.Binary;
+
+                    string newfilename = new Regex(@"([!@#$%^&*()/\\]|(?:[.](?![a-z0-9]+$)))", RegexOptions.IgnoreCase).Replace(mailData.Attachment.Name, "");
+                    newfilename = newfilename.Length < 50 ? newfilename : newfilename.Substring(0, 50 - newfilename.Substring(newfilename.LastIndexOf(".")).Length) + newfilename.Substring(newfilename.LastIndexOf("."));
+                    attSingle.FileName = RemoveDiacritics(newfilename);
+
+                    if (_loglevel > 300) { WriteInfoLog(string.Format(" ----- SendEmail >Attachment.Name: (attSingle) {0}", attSingle.FileName)); }
+
+                    multipart.Add(attSingle);
+                }
+
+                // Add additional attachments from EmailAttachment List
+                try
+                {
+                    foreach (EmailAttachment emailAtt in mailData.Attachements)
+                    {
+                        try
+                        {
+                            if (emailAtt.Attachment != null && emailAtt.Attachment.FileData != null)
+                            {
+                                var att = new MimePart(emailAtt.Attachment.MimeType);
+                                att.ContentObject = new ContentObject(new MemoryStream(emailAtt.Attachment.FileData), ContentEncoding.Default);
+                                att.ContentDisposition = new ContentDisposition(ContentDisposition.Attachment);
+                                att.ContentTransferEncoding = ContentEncoding.Base64;
+
+                                //att.ContentTransferEncoding = ContentEncoding.Binary;
+                                string newfilename = new Regex(@"([!@#$%^&*()/\\]|(?:[.](?![a-z0-9]+$)))", RegexOptions.IgnoreCase).Replace(emailAtt.Attachment.Name, "");
+                                newfilename = newfilename.Length < 50 ? newfilename : newfilename.Substring(0, 50 - newfilename.Substring(newfilename.LastIndexOf(".")).Length) + newfilename.Substring(newfilename.LastIndexOf("."));
+                                att.FileName = RemoveDiacritics(newfilename);
+
+                                if (_loglevel > 300) { WriteInfoLog(string.Format(" ----- SendEmail >Attachment.Name: {0}", att.FileName)); }
+
+
+                                multipart.Add(att);
+                            }
+                        }
+                        catch (Exception ex) { LogEx(ex); }
+                    }
+                }
+                catch (Exception ex) { LogEx(ex); }
+
+
+
+                msg.Body = multipart;
+
+                #region Check Spam
+
+                try
+                {
+                    if (_spamCheckEnabled)
+                    {
+                        var memstream = new MemoryStream();
+                        msg.Body.WriteTo(memstream);
+
+                        using (var m = memstream)
+                        {
+                            // do something with the raw message
+                            StreamReader reader = new StreamReader(m);
+                            string emailRawText = reader.ReadToEnd();
+
+                            List<Personal.AdminBase.SimpleSpamAssassin.RuleResult> spamCheckResult = SimpleSpamAssassin.GetReport(_spamAssassinServer, emailRawText);
+
+                            // Get Score
+                            if (spamCheckResult != null && spamCheckResult.Count > 0)
+                            {
+
+                                double totalSmapScore = 0; // > 0 = contains spam
+
+                                if (_spamUsedRulesListArr.Count() > 0)
+                                {
+                                    totalSmapScore = spamCheckResult.Where(xr => _spamUsedRulesListArr.Any(rt => xr.Rule.Contains(rt))).Sum(xr => xr.Score);
+                                }
+                                else
+                                {
+                                    totalSmapScore = spamCheckResult.Sum(xr => xr.Score);
+                                }
+
+                                if (totalSmapScore > _spamMaxAllowedScore)
+                                {
+                                    string sql = "update CampaignEmails set IsSpam = 1, SpamScore = {0} where CampaignEmailID = {1}";
+                                    sql = string.Format(sql, totalSmapScore, mailData.CampaignEmailID);
+
+                                    try
+                                    {
+                                        using (
+                                        SqlConnection conn = new SqlConnection(connString))
+                                        {
+                                            conn.Open();
+                                            SqlCommand c = new SqlCommand(sql, conn);
+                                            c.CommandTimeout = (10 * 60 * 1000);
+                                            int i = c.ExecuteNonQuery();
+                                            conn.Close();
+                                            conn.Dispose();
+                                        }
+                                    }
+                                    catch (SqlException ex)
+                                    {
+                                        if (ex.Number == -2) // SQL Server timeout
+                                        {
+                                            LogEx(new Exception("***** SERVICE STOPPED *****"), "ALL", "system", EventLogEntryType.Error, "error");
+                                            this.Stop();
+                                        }
+                                    }
+
+                                    return;
+                                }
+                            }
+
+                            memstream.Flush();
+                        }
+                    }
+                }
+                catch (Exception ex) { LogEx(ex); }
+                #endregion
+
+                // _smtpLogEnabled
+                //string smtpLogFile = System.IO.Path.Combine(_smtpLogPath, string.Format("smtplog_{0}.txt", clientID));
+
+                using (var client = new SmtpClient())
+                //using (var client = new SmtpClient(new ProtocolLogger(smtpLogFile)))
+                {
+                    //client.ProtocolLogger = new ProtocolLogger(smtpLogFile);
+
+                    string errorMsg = "";
+
+                    try
+                    {
+                        SecureSocketOptions secureOption = SecureSocketOptions.StartTls;
+
+                        switch (smtpSSLType)
+                        {
+                            case 0: { secureOption = SecureSocketOptions.None; break; };
+                            case 1: { secureOption = SecureSocketOptions.SslOnConnect; break; };
+                            case 2: { secureOption = SecureSocketOptions.StartTls; break; };
+                            case 3: { secureOption = SecureSocketOptions.Auto; break; };
+                            default: { secureOption = SecureSocketOptions.StartTls; break; }
+                        }
+
+                        client.Connect(smtpServer, smtpPort, secureOption);
+                    }
+                    catch (SmtpCommandException ex)
+                    {
+                        errorMsg += string.Format("Error trying to connect: {0}", ex.Message);
+                        errorMsg += string.Format("\tStatusCode: {0}", ex.StatusCode);
+                    }
+                    catch (SmtpProtocolException ex)
+                    {
+                        errorMsg += string.Format("Protocol error while trying to connect: {0}", ex.Message);
+                    }
+
+                    // Note: Not all SMTP servers support authentication, but GMail does.
+                    if (client.Capabilities.HasFlag(SmtpCapabilities.Authentication))
+                    {
+                        try
+                        {
+                            client.Authenticate(smtpLogin, smtpPassword);
+                        }
+                        catch (AuthenticationException ex)
+                        {
+                            errorMsg += string.Format("Invalid user name or password.");
+                        }
+                        catch (SmtpCommandException ex)
+                        {
+                            errorMsg += string.Format("Error trying to authenticate: {0}", ex.Message);
+                            errorMsg += string.Format("\tStatusCode: {0}", ex.StatusCode);
+                        }
+                        catch (SmtpProtocolException ex)
+                        {
+                            errorMsg += string.Format("Protocol error while trying to authenticate: {0}", ex.Message);
+                        }
+                    }
+
+                    try
+                    {
+                        client.Send(msg);
+                        //client.Send(msg, new MailboxAddress(senderName, mailData.Sender), msg.To.Mailboxes);
+
+                    }
+                    catch (SmtpCommandException ex)
+                    {
+                        errorMsg += string.Format("Error sending message: {0}", ex.Message);
+                        errorMsg += string.Format("\tStatusCode: {0}", ex.StatusCode);
+
+                        switch (ex.ErrorCode)
+                        {
+                            case SmtpErrorCode.RecipientNotAccepted:
+                                errorMsg += string.Format("\tRecipient not accepted: {0}", ex.Mailbox);
+                                break;
+                            case SmtpErrorCode.SenderNotAccepted:
+                                errorMsg += string.Format("\tSender not accepted: {0}", ex.Mailbox);
+                                break;
+                            case SmtpErrorCode.MessageNotAccepted:
+                                errorMsg += string.Format("\tMessage not accepted.");
+                                break;
+                        }
+                    }
+                    catch (SmtpProtocolException ex)
+                    {
+                        errorMsg += string.Format("Protocol error while sending message: {0}", ex.Message);
+                    }
+
+                    try
+                    {
+                        using (SqlConnection conn = new SqlConnection(connString))
+                        {
+
+                            int sendSuccess = string.IsNullOrEmpty(errorMsg) == true ? 1 : 0;
+                            int deliveredSuccess = string.IsNullOrEmpty(errorMsg) == true ? 1 : 0;
+                            string dateNow = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff");
+
+                            conn.Open();
+                            string sql = "update CampaignEmails set Sent = @Sent, SentDate = @SentDate, Delivered = @Delivered, DeliveryFailureMsg = @DeliveryFailureMsg where CampaignEmailID = @CampaignEmailID";
+
+                            SqlCommand c = new SqlCommand(sql, conn);
+                            c.CommandTimeout = (1000 * 60 * 10);
+                            c.Parameters.Add(new SqlParameter("@Sent", sendSuccess));
+                            c.Parameters.Add(new SqlParameter("@SentDate", dateNow));
+                            c.Parameters.Add(new SqlParameter("@Delivered", deliveredSuccess));
+                            c.Parameters.Add(new SqlParameter("@DeliveryFailureMsg", errorMsg));
+                            c.Parameters.Add(new SqlParameter("@CampaignEmailID", mailData.CampaignEmailID));
+                            int i = c.ExecuteNonQuery();
+
+                            conn.Close();
+                            conn.Dispose();
+                        }
+                    }
+                    catch (SqlException ex)
+                    {
+                        if (ex.Number == -2) // SQL Server timeout
+                        {
+                            LogEx(new Exception("***** SERVICE STOPPED *****"), "ALL", "system", EventLogEntryType.Error, "error");
+                            this.Stop();
+                        }
+                    }
+
+                    client.Disconnect(true);
+                }
+
+
+                await Task.Delay(100);
+            }
+            catch (Exception ex) { LogEx(ex); }
+        }

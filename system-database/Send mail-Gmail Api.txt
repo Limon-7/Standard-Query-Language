@@ -1,0 +1,130 @@
+
+ /* Fetch sent Messages */
+  GetSentMails(): void {
+    if (!this.stateFlag) {
+      return;
+    }
+    const request = gapi.client.gmail.users.messages.list({
+      userId: 'me',
+      format: 'full',
+      maxResults: 5,
+      labelIds: 'SENT',
+    });
+    request.execute(res => {
+      console.log('Sent Mail Box');
+      for (const mess of res.messages) {
+        // console.log('messageId:', mess.id);
+        const messageRequest = gapi.client.gmail.users.messages.get({
+          userId: 'me',
+          id: mess.id,
+
+        }).then(result => {
+
+          console.log('result:', result);
+          console.log('History-Id::', result.result.historyId);
+          console.log('Label-Id::', result.result.labelIds[0]);
+          console.log('Date::', result.result.payload.headers[1].value);
+          console.log('Message - ID::', result.result.payload.headers[2].value);
+          console.log('Subject::', result.result.payload.headers[3].value);
+          console.log('From::', result.result.payload.headers[4].value);
+          console.log('To:', result.result.payload.headers[5].value);
+        });
+      }
+    });
+  }
+
+/* Send Emails */
+  TestSendMail(formData: any) {
+
+    let response: any;
+    /*
+    
+Raw mails
+    // img.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    // file.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const mails = [
+      'Content-Type: multipart/mixed; boundary="foo_bar_baz"\r\n',
+      'MIME-Version: 1.0\r\n',
+      'to: liibd7@gmail.com\r\n',
+      'from: limon14203165@gmail.com\r\n',
+      'subject: Subject Text\r\n\r\n',
+
+      '--foo_bar_baz\r\n',
+      'Content-Type: text/plain; charset="UTF-8"\r\n',
+      'MIME-Version: 1.0\r\n',
+      'Content-Transfer-Encoding: 7bit\r\n\r\n',
+
+      'The actual message text goes here\r\n\r\n',
+
+      '--foo_bar_baz\r\n',
+      'Content-Type: image/jpeg\r\n',
+      'MIME-Version: 1.0\r\n',
+      'Content-Transfer-Encoding: base64\r\n',
+      'Content-Disposition: attachment; filename="icon.jpg"\r\n\r\n',
+
+      'img', '\r\n\r\n',
+
+      '--foo_bar_baz\r\n',
+      'Content-Type: text/html\r\n',
+      'MIME-Version: 1.0\r\n',
+      'Content-Transfer-Encoding: base64\r\n',
+      'Content-Disposition: attachment; filename="index.html"\r\n\r\n',
+
+      'file', '\r\n\r\n',
+
+      '--foo_bar_baz--'
+    ].join('');
+    // console.log('Dummy data', mails); 
+     */
+    // const reallyEncodedMessage = encodedMessage.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    gapi.client.gmail.users.messages.send({
+      'userId': 'me',
+      'uploadType': 'multipart',
+      'resource': {
+        'raw': formData
+      }
+    }).then(res => {
+      response = res;
+      console.log('message send successfully');
+      console.log('Response:', response);
+    });
+    return response;
+  }
+  TestSendMails(): void {
+    const content = 'HELLO';
+    // I have an email account on GMail.  consts call it 'theSenderEmail@gmail.com'
+    const sender = 'limon14203165@gmail.com';
+    // And an email account on Hotmail.  consts call it 'theReceiverEmail@gmail.com'\
+    // Note: I tried several 'receiver' email accounts, including one on GMail.  None received the email.
+    const receiver = 'liibd7@hotmail.com';
+    const to = 'To: ' + receiver;
+    const from = 'From: ' + sender;
+    const subject = 'Subject: ' + 'HELLO TEST';
+    const contentType = 'Content-Type: text/plain; charset=utf-8';
+    const mime = 'MIME-Version: 1.0';
+
+    let message = '';
+    message += to + '\r\n';
+    message += from + '\r\n';
+    message += subject + '\r\n';
+    message += contentType + '\r\n';
+    message += mime + '\r\n';
+    message += '\r\n' + content + '\r\n';
+
+    const path = 'gmail/v1/users/me/messages/send?key=' + this.apiKey;
+    const base64EncodedEmail = btoa(message).replace(/\+/g, '-').replace(/\//g, '_');
+    gapi.client.request({
+      path: path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'message/rfc822'
+      },
+      body: {
+        data: base64EncodedEmail
+      }
+    }).then(response => {
+      console.log('REsponse:', response);
+    }).catch(err => console.log(err));
+  }
